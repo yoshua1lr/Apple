@@ -485,6 +485,12 @@ def main() -> None:
         raise SystemExit(
             "Discord rejected DISCORD_BOT_TOKEN. Check the token in Replit Secrets."
         ) from exc
+    except discord.PrivilegedIntentsRequired as exc:
+        raise SystemExit(
+            "Discord requires Message Content Intent for the !setup command. "
+            "Enable it in the Discord Developer Portal under your application's "
+            "Bot settings, then restart the bot."
+        ) from exc
 
 
 if __name__ == "__main__":
