@@ -48,20 +48,29 @@ def load_state() -> dict[str, Any]:
         if not isinstance(roster, dict):
             raise ValueError("roster must be an object")
 
-        normalized_roster: dict[str, dict[str, dict[str, str]]] = {}
+        normalized_roster: dict[str, dict[str, dict[str, Any]]] = {}
         for role, capacity in ROLE_CAPACITIES.items():
             members = roster.get(role, {})
             if not isinstance(members, dict) or len(members) > capacity:
                 raise ValueError(f"invalid member list for {role}")
 
-            normalized_members: dict[str, dict[str, str]] = {}
+            normalized_members: dict[str, dict[str, Any]] = {}
             for user_id, record in members.items():
                 if not isinstance(record, dict):
                     raise ValueError(f"invalid member record for {role}")
+                original_nickname = record.get("original_nickname")
+                nickname_managed = record.get("nickname_managed", False)
+                if original_nickname is not None and not isinstance(original_nickname, str):
+                    raise ValueError(f"invalid original nickname for {role}")
+                if not isinstance(nickname_managed, bool):
+                    raise ValueError(f"invalid nickname status for {role}")
                 normalized_members[str(user_id)] = {
                     "ign": str(record["ign"]),
                     "roblox_username": str(record["roblox_username"]),
                     "discord_name": str(record.get("discord_name", "Discord user")),
+                    "original_nickname": original_nickname,
+                    # Older roster entries predate nickname management.
+                    "nickname_managed": nickname_managed,
                 }
             normalized_roster[role] = normalized_members
 
@@ -181,8 +190,17 @@ async def register_member(
     ign: str,
     roblox_username: str,
 ) -> str:
-    """Return 'added', 'already_registered', or 'full'."""
-    user_id = str(interaction.user.id)
+    """Return 'added', 'already_registered', 'full', or 'nickname_failed'."""
+    member = interaction.user
+    if not isinstance(member, discord.Member):
+        return "nickname_failed"
+
+    clean_ign = ign.strip()
+    clean_roblox_username = roblox_username.strip()
+    if not clean_ign or not clean_roblox_username:
+        return "invalid_details"
+
+    user_id = str(member.id)
     async with state_lock:
         if any(user_id in members for members in state["roster"].values()):
             return "already_registered"
@@ -192,11 +210,20 @@ async def register_member(
             return "full"
 
         members[user_id] = {
-            "ign": safe_embed_text(ign, 32),
-            "roblox_username": safe_embed_text(roblox_username, 32),
-            "discord_name": safe_embed_text(interaction.user.display_name, 48),
+            "ign": clean_ign,
+            "roblox_username": clean_roblox_username,
+            "discord_name": safe_embed_text(member.display_name, 48),
+            "original_nickname": member.nick,
+            "nickname_managed": True,
         }
         save_state()
+        try:
+            await member.edit(nick=clean_ign, reason="Roster signup")
+        except discord.HTTPException:
+            logger.exception("Could not change the nickname for roster member %s.", user_id)
+            del members[user_id]
+            save_state()
+            return "nickname_failed"
 
     await refresh_panel()
     return "added"
@@ -219,6 +246,13 @@ class SignupModal(discord.ui.Modal, title="Join the Roster"):
     )
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
+        if not self.ign.value.strip() or not self.roblox_username.value.strip():
+            await interaction.response.send_message(
+                "Please enter both an in-game name and Roblox username.",
+                ephemeral=True,
+            )
+            return
+
         user_id = str(interaction.user.id)
         if any(user_id in members for members in state["roster"].values()):
             await interaction.response.send_message(
@@ -283,7 +317,7 @@ class RoleSelect(discord.ui.Select):
 
         if result == "added":
             await interaction.response.edit_message(
-                content=f"You are signed up as **{role}**.",
+                content=f"You are signed up as **{role}**, and your nickname is now your IGN.",
                 view=None,
             )
         elif result == "full":
@@ -307,13 +341,20 @@ class RoleSelect(discord.ui.Select):
                     view=None,
                 )
         else:
-            await interaction.response.edit_message(
-                content=(
+            if result == "nickname_failed":
+                message = (
+                    "I couldn't change your server nickname, so you were not added. "
+                    "Ask a server manager to give the bot **Manage Nicknames** and "
+                    "place its role above your role, then try again."
+                )
+            elif result == "invalid_details":
+                message = "Enter both names before choosing a role."
+            else:
+                message = (
                     "You are already on the roster. Use **Leave Roster** "
                     "before signing up again."
-                ),
-                view=None,
-            )
+                )
+            await interaction.response.edit_message(content=message, view=None)
 
 
 class RoleSelectionView(discord.ui.View):
@@ -373,13 +414,41 @@ class SignupPanelView(discord.ui.View):
     ) -> None:
         user_id = str(interaction.user.id)
         removed_role: str | None = None
+        nickname_restore_failed = False
         async with state_lock:
             for role, members in state["roster"].items():
                 if user_id in members:
+                    record = members[user_id]
+                    if record.get("nickname_managed"):
+                        if not isinstance(interaction.user, discord.Member):
+                            nickname_restore_failed = True
+                            break
+                        try:
+                            await interaction.user.edit(
+                                nick=record.get("original_nickname"),
+                                reason="Leaving the signup roster",
+                            )
+                        except discord.HTTPException:
+                            logger.exception(
+                                "Could not restore the nickname for roster member %s.",
+                                user_id,
+                            )
+                            nickname_restore_failed = True
+                            break
+
                     del members[user_id]
                     removed_role = role
                     save_state()
                     break
+
+        if nickname_restore_failed:
+            await interaction.response.send_message(
+                "I couldn't restore your nickname, so your signup was kept. "
+                "Ask a server manager to check the bot's **Manage Nicknames** "
+                "permission and role position, then try again.",
+                ephemeral=True,
+            )
+            return
 
         if removed_role is None:
             await interaction.response.send_message(
@@ -390,7 +459,7 @@ class SignupPanelView(discord.ui.View):
 
         await refresh_panel()
         await interaction.response.send_message(
-            f"You have left the **{removed_role}** roster.",
+            f"You have left the **{removed_role}** roster, and your previous nickname was restored.",
             ephemeral=True,
         )
 
@@ -448,6 +517,63 @@ async def setup_panel_command(ctx: commands.Context[SignupBot]) -> None:
     await ctx.send("Signup panel is ready.", delete_after=8)
 
 
+@bot.command(name="reset")
+@commands.guild_only()
+@commands.has_guild_permissions(manage_guild=True)
+async def reset_roster_command(ctx: commands.Context[SignupBot]) -> None:
+    """Restore saved nicknames and clear the active roster."""
+    if ctx.guild is None:
+        await ctx.send("Run `!reset` in a server text channel.")
+        return
+
+    restored_nicknames = 0
+    cleared_signups = 0
+    failed_restores = 0
+
+    async with state_lock:
+        for members in state["roster"].values():
+            for user_id, record in list(members.items()):
+                if record.get("nickname_managed"):
+                    try:
+                        member = ctx.guild.get_member(int(user_id))
+                        if member is None:
+                            member = await ctx.guild.fetch_member(int(user_id))
+                        await member.edit(
+                            nick=record.get("original_nickname"),
+                            reason="Roster reset",
+                        )
+                        restored_nicknames += 1
+                    except discord.NotFound:
+                        # The member left the server; there is no nickname to restore.
+                        pass
+                    except discord.HTTPException:
+                        logger.exception(
+                            "Could not restore nickname for roster member %s.",
+                            user_id,
+                        )
+                        failed_restores += 1
+                        continue
+
+                del members[user_id]
+                cleared_signups += 1
+
+        save_state()
+
+    await refresh_panel()
+    if failed_restores:
+        await ctx.send(
+            f"Reset partially completed: restored {restored_nicknames} nickname(s) "
+            f"and cleared {cleared_signups} signup(s). {failed_restores} signup(s) "
+            "remain so you can retry. Check the bot's **Manage Nicknames** permission "
+            "and make sure its role is above the affected members, then run `!reset` again."
+        )
+    else:
+        await ctx.send(
+            f"Roster cleared. Restored {restored_nicknames} nickname(s) and "
+            f"removed {cleared_signups} signup(s)."
+        )
+
+
 @bot.event
 async def on_command_error(
     ctx: commands.Context[SignupBot],
@@ -456,10 +582,12 @@ async def on_command_error(
     if isinstance(error, commands.CommandNotFound):
         return
     if isinstance(error, commands.MissingPermissions):
-        await ctx.send("You need the **Manage Server** permission to use `!setup`.")
+        await ctx.send(
+            "You need the **Manage Server** permission to use `!setup` or `!reset`."
+        )
         return
     if isinstance(error, commands.NoPrivateMessage):
-        await ctx.send("Use `!setup` in a server text channel.")
+        await ctx.send("Use `!setup` or `!reset` in a server text channel.")
         return
 
     logger.error("Command failed: %s", error)
