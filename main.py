@@ -21,6 +21,7 @@ logging.basicConfig(
 logger = logging.getLogger("signup_bot")
 
 ROLE_CAPACITIES = {"Healer": 3, "Starrk": 9}
+STARRK_GROUP_SIZE = 3
 STATE_FILE = Path(__file__).with_name("roster.json")
 PANEL_VIEW_TIMEOUT = None
 EPHEMERAL_VIEW_TIMEOUT = 300
@@ -136,6 +137,42 @@ def build_panel_embed() -> discord.Embed:
     roster = state["roster"]
     for role, capacity in ROLE_CAPACITIES.items():
         members = list(roster[role].items())
+
+        if role == "Starrk":
+            for group_index, start in enumerate(
+                range(0, capacity, STARRK_GROUP_SIZE),
+                start=1,
+            ):
+                group_capacity = min(STARRK_GROUP_SIZE, capacity - start)
+                group_members = members[start : start + group_capacity]
+                lines = []
+                for offset in range(group_capacity):
+                    slot_number = start + offset + 1
+                    if offset < len(group_members):
+                        user_id, member = group_members[offset]
+                        ign = safe_embed_text(member["ign"], 32)
+                        roblox_username = safe_embed_text(
+                            member["roblox_username"],
+                            32,
+                        )
+                        discord_name = safe_embed_text(member["discord_name"], 48)
+                        lines.append(
+                            f"**{slot_number}.** {ign} — Roblox: `{roblox_username}` "
+                            f"· Discord: {discord_name} (<@{user_id}>)"
+                        )
+                    else:
+                        lines.append(f"**{slot_number}.** Open")
+
+                embed.add_field(
+                    name=(
+                        f"Starrk Group {group_index} — "
+                        f"{len(group_members)}/{group_capacity}"
+                    ),
+                    value="\n".join(lines),
+                    inline=False,
+                )
+            continue
+
         lines = []
         for slot_number in range(1, capacity + 1):
             if slot_number <= len(members):
