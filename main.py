@@ -219,7 +219,7 @@ async def register_member(
     ign: str,
     roblox_username: str,
 ) -> str:
-    """Return 'added', 'already_registered', 'full', or 'nickname_failed'."""
+    """Return a signup result, including the server-owner nickname exception."""
     member = interaction.user
     if not isinstance(member, discord.Member):
         return "nickname_failed"
@@ -238,24 +238,29 @@ async def register_member(
         if len(members) >= ROLE_CAPACITIES[role]:
             return "full"
 
+        is_server_owner = member.guild.owner_id == member.id
         members[user_id] = {
             "ign": clean_ign,
             "roblox_username": clean_roblox_username,
             "discord_name": safe_embed_text(member.display_name, 48),
             "original_nickname": member.nick,
-            "nickname_managed": True,
+            "nickname_managed": not is_server_owner,
         }
         save_state()
-        try:
-            await member.edit(nick=clean_ign, reason="Roster signup")
-        except discord.HTTPException:
-            logger.exception("Could not change the nickname for roster member %s.", user_id)
-            del members[user_id]
-            save_state()
-            return "nickname_failed"
+        if not is_server_owner:
+            try:
+                await member.edit(nick=clean_ign, reason="Roster signup")
+            except discord.HTTPException:
+                logger.exception(
+                    "Could not change the nickname for roster member %s.",
+                    user_id,
+                )
+                del members[user_id]
+                save_state()
+                return "nickname_failed"
 
     await refresh_panel()
-    return "added"
+    return "added_owner" if is_server_owner else "added"
 
 
 class SignupModal(discord.ui.Modal, title="Join the Roster"):
@@ -344,9 +349,18 @@ class RoleSelect(discord.ui.Select):
             view.roblox_username,
         )
 
-        if result == "added":
+        if result in {"added", "added_owner"}:
+            if result == "added_owner":
+                confirmation = (
+                    f"You are signed up as **{role}**. Discord doesn't allow bots "
+                    "to change the server owner's nickname, so yours was left unchanged."
+                )
+            else:
+                confirmation = (
+                    f"You are signed up as **{role}**, and your nickname is now your IGN."
+                )
             await interaction.response.edit_message(
-                content=f"You are signed up as **{role}**, and your nickname is now your IGN.",
+                content=confirmation,
                 view=None,
             )
         elif result == "full":
@@ -444,11 +458,13 @@ class SignupPanelView(discord.ui.View):
         user_id = str(interaction.user.id)
         removed_role: str | None = None
         nickname_restore_failed = False
+        nickname_was_managed = False
         async with state_lock:
             for role, members in state["roster"].items():
                 if user_id in members:
                     record = members[user_id]
-                    if record.get("nickname_managed"):
+                    nickname_was_managed = bool(record.get("nickname_managed"))
+                    if nickname_was_managed:
                         if not isinstance(interaction.user, discord.Member):
                             nickname_restore_failed = True
                             break
@@ -487,10 +503,14 @@ class SignupPanelView(discord.ui.View):
             return
 
         await refresh_panel()
-        await interaction.response.send_message(
-            f"You have left the **{removed_role}** roster, and your previous nickname was restored.",
-            ephemeral=True,
-        )
+        if nickname_was_managed:
+            leave_message = (
+                f"You have left the **{removed_role}** roster, and your previous "
+                "nickname was restored."
+            )
+        else:
+            leave_message = f"You have left the **{removed_role}** roster."
+        await interaction.response.send_message(leave_message, ephemeral=True)
 
 
 class SignupBot(commands.Bot):
