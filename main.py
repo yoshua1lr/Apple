@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,10 @@ logger = logging.getLogger("signup_bot")
 
 ROLE_CAPACITIES = {"Healer": 3, "Starrk": 9}
 STARRK_GROUP_SIZE = 3
+REMOVE_SELECTOR_RE = re.compile(
+    r"^(healers?|starrks?)(?:\[(\d+)\]|(\d+))?$",
+    re.IGNORECASE,
+)
 STATE_FILE = Path(__file__).with_name("roster.json")
 PANEL_VIEW_TIMEOUT = None
 EPHEMERAL_VIEW_TIMEOUT = 300
@@ -670,6 +675,122 @@ async def reset_roster_command(ctx: commands.Context[SignupBot]) -> None:
         )
 
 
+@bot.command(name="remove")
+@commands.guild_only()
+@commands.has_guild_permissions(manage_guild=True)
+async def remove_roster_slot(
+    ctx: commands.Context[SignupBot],
+    role_selector: str,
+    slot_argument: str | None = None,
+) -> None:
+    """Force-remove an occupied role slot, e.g. !remove healer[2]."""
+    if ctx.guild is None:
+        await ctx.send("Run `!remove` in a server text channel.")
+        return
+
+    role_match = REMOVE_SELECTOR_RE.fullmatch(role_selector.strip())
+    if role_match is None:
+        await ctx.send(
+            "Use `!remove healer[2]` or `!remove starrk[5]`. "
+            "You can also use `!remove healer 2`."
+        )
+        return
+
+    role_text = role_match.group(1).lower()
+    role = "Healer" if role_text.startswith("healer") else "Starrk"
+    embedded_slot = role_match.group(2) or role_match.group(3)
+    if slot_argument is not None:
+        try:
+            slot_number = int(slot_argument)
+        except ValueError:
+            await ctx.send("The slot number must be a whole number.")
+            return
+        if embedded_slot is not None:
+            await ctx.send(
+                "Give the slot number once, like `!remove healer[2]` "
+                "or `!remove healer 2`."
+            )
+            return
+    elif embedded_slot is not None:
+        slot_number = int(embedded_slot)
+    else:
+        await ctx.send(
+            "Include a slot number, like `!remove healer[2]` "
+            "or `!remove healer 2`."
+        )
+        return
+
+    capacity = ROLE_CAPACITIES[role]
+    if not 1 <= slot_number <= capacity:
+        await ctx.send(f"{role} slot numbers must be between 1 and {capacity}.")
+        return
+
+    nickname_restore_failed = False
+    nickname_restored = False
+    member_missing = False
+    removed_ign: str | None = None
+
+    async with state_lock:
+        role_members = state["roster"][role]
+        roster_entries = list(role_members.items())
+        if slot_number > len(roster_entries):
+            await ctx.send(f"{role} slot {slot_number} is currently open.")
+            return
+
+        user_id, record = roster_entries[slot_number - 1]
+        removed_ign = safe_embed_text(record["ign"], 32)
+
+        if record.get("nickname_managed"):
+            try:
+                member = ctx.guild.get_member(int(user_id))
+                if member is None:
+                    member = await ctx.guild.fetch_member(int(user_id))
+                await member.edit(
+                    nick=record.get("original_nickname"),
+                    reason=f"Removed from the roster by {ctx.author}",
+                )
+                nickname_restored = True
+            except discord.NotFound:
+                # The member left the server; remove the stale roster entry.
+                member_missing = True
+            except discord.HTTPException:
+                logger.exception(
+                    "Could not restore nickname for roster member %s.",
+                    user_id,
+                )
+                nickname_restore_failed = True
+
+        if not nickname_restore_failed:
+            del role_members[user_id]
+            save_state()
+
+    if nickname_restore_failed:
+        await ctx.send(
+            f"I couldn't restore {removed_ign}'s nickname, so the roster entry "
+            "was kept. Check **Manage Nicknames** and the bot's role position, "
+            "then run the same `!remove` command again."
+        )
+        return
+
+    await refresh_panel()
+    if nickname_restored:
+        result = (
+            f"Removed **{removed_ign}** from **{role}** slot {slot_number} "
+            "and restored their previous nickname."
+        )
+    elif member_missing:
+        result = (
+            f"Removed **{removed_ign}** from **{role}** slot {slot_number}; "
+            "they are no longer in the server."
+        )
+    else:
+        result = (
+            f"Removed **{removed_ign}** from **{role}** slot {slot_number}. "
+            "Their nickname was unchanged."
+        )
+    await ctx.send(result)
+
+
 @bot.event
 async def on_command_error(
     ctx: commands.Context[SignupBot],
@@ -679,15 +800,32 @@ async def on_command_error(
         return
     if isinstance(error, commands.MissingPermissions):
         await ctx.send(
-            "You need the **Manage Server** permission to use `!setup` or `!reset`."
+            "You need the **Manage Server** permission to use `!setup`, `!reset`, "
+            "or `!remove`."
         )
         return
     if isinstance(error, commands.NoPrivateMessage):
-        await ctx.send("Use `!setup` or `!reset` in a server text channel.")
+        await ctx.send(
+            "Use `!setup`, `!reset`, or `!remove` in a server text channel."
+        )
         return
 
+    if isinstance(
+        error,
+        (
+            commands.MissingRequiredArgument,
+            commands.BadArgument,
+            commands.TooManyArguments,
+        ),
+    ):
+        if ctx.command and ctx.command.name == "remove":
+            await ctx.send(
+                "Usage: `!remove healer[2]` or `!remove starrk[5]`."
+            )
+            return
+
     logger.error("Command failed: %s", error)
-    await ctx.send("The signup panel could not be set up. Check the bot logs.")
+    await ctx.send("The command could not be completed. Check the bot logs.")
 
 
 @bot.event
