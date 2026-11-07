@@ -1,0 +1,11 @@
+[project]
+name = "discord-signup-bot"
+version = "1.0.0"
+description = "A Discord signup panel for a limited Healer and Starrk roster."
+requires-python = ">=3.11"
+dependencies = [
+    "discord.py>=2.7.1,<3.0.0",
+]
+
+[tool.uv]
+package = false

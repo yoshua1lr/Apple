@@ -16,6 +16,10 @@ out-tsc
 
 # dependencies
 node_modules
+.pythonlibs/
+__pycache__/
+*.py[cod]
+roster.json
 
 # IDEs and editors
 /.idea
