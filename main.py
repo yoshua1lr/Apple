@@ -184,6 +184,35 @@ async def refresh_panel() -> None:
         logger.exception("Could not refresh the signup panel.")
 
 
+async def delete_panel_locked() -> bool:
+    """Delete the saved signup panel while the caller holds state_lock."""
+    channel_id = state.get("panel_channel_id")
+    message_id = state.get("panel_message_id")
+    if not channel_id or not message_id:
+        return True
+
+    try:
+        channel = bot.get_channel(channel_id)
+        if channel is None:
+            channel = await bot.fetch_channel(channel_id)
+        message = await channel.fetch_message(message_id)
+        await message.delete()
+    except discord.NotFound:
+        # The panel was already deleted.
+        pass
+    except discord.Forbidden:
+        logger.warning("The bot cannot delete the saved signup panel.")
+        return False
+    except discord.HTTPException:
+        logger.exception("Could not delete the saved signup panel.")
+        return False
+
+    state["panel_channel_id"] = None
+    state["panel_message_id"] = None
+    save_state()
+    return True
+
+
 async def register_member(
     interaction: discord.Interaction,
     role: str,
@@ -529,6 +558,7 @@ async def reset_roster_command(ctx: commands.Context[SignupBot]) -> None:
     restored_nicknames = 0
     cleared_signups = 0
     failed_restores = 0
+    panel_deleted = False
 
     async with state_lock:
         for members in state["roster"].values():
@@ -557,20 +587,29 @@ async def reset_roster_command(ctx: commands.Context[SignupBot]) -> None:
                 del members[user_id]
                 cleared_signups += 1
 
+        if failed_restores == 0:
+            panel_deleted = await delete_panel_locked()
         save_state()
 
-    await refresh_panel()
     if failed_restores:
+        await refresh_panel()
         await ctx.send(
             f"Reset partially completed: restored {restored_nicknames} nickname(s) "
             f"and cleared {cleared_signups} signup(s). {failed_restores} signup(s) "
             "remain so you can retry. Check the bot's **Manage Nicknames** permission "
             "and make sure its role is above the affected members, then run `!reset` again."
         )
+    elif not panel_deleted:
+        await refresh_panel()
+        await ctx.send(
+            f"Roster cleared and {restored_nicknames} nickname(s) restored, but I "
+            "couldn't delete the signup panel message. Check that I can access "
+            "the panel's channel."
+        )
     else:
         await ctx.send(
-            f"Roster cleared. Restored {restored_nicknames} nickname(s) and "
-            f"removed {cleared_signups} signup(s)."
+            f"Roster cleared. Restored {restored_nicknames} nickname(s), removed "
+            f"{cleared_signups} signup(s), and deleted the signup panel."
         )
 
 
