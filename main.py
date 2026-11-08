@@ -1,4 +1,4 @@
-"""Discord signup panel for Healer and Starrk roster slots."""
+"""Discord signup panel for Healer, Starrk, and Prio Misc roster slots."""
 
 from __future__ import annotations
 
@@ -21,10 +21,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger("signup_bot")
 
-ROLE_CAPACITIES = {"Healer": 3, "Starrk": 9}
+ROLE_CAPACITIES = {"Healer": 3, "Starrk": 9, "Prio Misc": 1}
 STARRK_GROUP_SIZE = 3
 REMOVE_SELECTOR_RE = re.compile(
-    r"^(healers?|starrks?)(?:\[(\d+)\]|(\d+))?$",
+    r"^(healers?|starrks?|prio[\s_-]*misc)\s*(?:\[(\d+)\]|(\d+))?$",
     re.IGNORECASE,
 )
 STATE_FILE = Path(__file__).with_name("roster.json")
@@ -367,7 +367,7 @@ class RoleSelect(discord.ui.Select):
             for role in available_roles
         ]
         super().__init__(
-            placeholder="Select Healer or Starrk",
+            placeholder="Select a role",
             min_values=1,
             max_values=1,
             options=options,
@@ -680,8 +680,8 @@ async def reset_roster_command(ctx: commands.Context[SignupBot]) -> None:
 @commands.has_guild_permissions(manage_guild=True)
 async def remove_roster_slot(
     ctx: commands.Context[SignupBot],
+    *,
     role_selector: str,
-    slot_argument: str | None = None,
 ) -> None:
     """Force-remove an occupied role slot, e.g. !remove healer[2]."""
     if ctx.guild is None:
@@ -691,32 +691,27 @@ async def remove_roster_slot(
     role_match = REMOVE_SELECTOR_RE.fullmatch(role_selector.strip())
     if role_match is None:
         await ctx.send(
-            "Use `!remove healer[2]` or `!remove starrk[5]`. "
-            "You can also use `!remove healer 2`."
+            "Use `!remove healer[2]`, `!remove starrk[5]`, or "
+            "`!remove prio misc[1]`. You can also put the slot after the role, "
+            "like `!remove prio misc 1`."
         )
         return
 
     role_text = role_match.group(1).lower()
-    role = "Healer" if role_text.startswith("healer") else "Starrk"
+    normalized_role = re.sub(r"[\s_-]", "", role_text)
+    if normalized_role.startswith("healer"):
+        role = "Healer"
+    elif normalized_role.startswith("starrk"):
+        role = "Starrk"
+    else:
+        role = "Prio Misc"
     embedded_slot = role_match.group(2) or role_match.group(3)
-    if slot_argument is not None:
-        try:
-            slot_number = int(slot_argument)
-        except ValueError:
-            await ctx.send("The slot number must be a whole number.")
-            return
-        if embedded_slot is not None:
-            await ctx.send(
-                "Give the slot number once, like `!remove healer[2]` "
-                "or `!remove healer 2`."
-            )
-            return
-    elif embedded_slot is not None:
+    if embedded_slot is not None:
         slot_number = int(embedded_slot)
     else:
         await ctx.send(
-            "Include a slot number, like `!remove healer[2]` "
-            "or `!remove healer 2`."
+            "Include a slot number, like `!remove healer[2]` or "
+            "`!remove prio misc[1]`."
         )
         return
 
@@ -820,7 +815,8 @@ async def on_command_error(
     ):
         if ctx.command and ctx.command.name == "remove":
             await ctx.send(
-                "Usage: `!remove healer[2]` or `!remove starrk[5]`."
+                "Usage: `!remove healer[2]`, `!remove starrk[5]`, "
+                "or `!remove prio misc[1]`."
             )
             return
 
