@@ -2,7 +2,8 @@ modules = ["nodejs-24", "python-base-3.13"]
 
 [deployment]
 router = "application"
-deploymentTarget = "autoscale"
+deploymentTarget = "vm"
+run = ["uv", "run", "python", "main.py"]
 
 [deployment.postBuild]
 args = ["pnpm", "store", "prune"]
